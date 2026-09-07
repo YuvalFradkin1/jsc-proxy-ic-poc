@@ -1,0 +1,55 @@
+name: JSC Proxy Handler IC Stale Pointer
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  poc:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find jsc binary
+        run: |
+          JSC=$(find /System/Library/Frameworks/JavaScriptCore.framework -name "jsc" 2>/dev/null | head -1)
+          [ -z "$JSC" ] && JSC=$(find /Applications/Xcode*.app -name "jsc" 2>/dev/null | head -1)
+          echo "JSC=$JSC" >> $GITHUB_ENV
+          echo "jsc: $JSC"
+          sw_vers && uname -m
+
+      - name: Control A (expect exit 0)
+        run: |
+          set +e; timeout 10 "$JSC" pocs/control_a.js 2>&1; echo "exit_a=$?" >> $GITHUB_ENV
+
+      - name: Control B (expect exit 0)
+        run: |
+          set +e; timeout 10 "$JSC" pocs/control_b.js 2>&1; echo "exit_b=$?" >> $GITHUB_ENV
+
+      - name: Control C (expect exit 0)
+        run: |
+          set +e; timeout 10 "$JSC" pocs/control_c.js 2>&1; echo "exit_c=$?" >> $GITHUB_ENV
+
+      - name: PoC D - FULL TRIGGER (expect SIGSEGV exit 139)
+        run: |
+          echo "=== POC D: poly-proto + IC warm + setPrototypeOf(null) + re-access ==="
+          set +e
+          timeout 10 "$JSC" pocs/poc_d.js 2>&1
+          EXIT=$?
+          set -e
+          echo "exit_d=$EXIT" >> $GITHUB_ENV
+          if [ $EXIT -eq 139 ]; then
+            echo "*** SIGSEGV CONFIRMED *** exit 139"
+            echo "CWE-476: JSC::ProxyObject::getHandlerTrap stale IC dereference"
+          elif [ $EXIT -eq 0 ]; then
+            echo "Survived — JSC patched"
+          else
+            echo "Exit: $EXIT"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "Control A: $exit_a | Control B: $exit_b | Control C: $exit_c | PoC D: $exit_d"
+          [ "$exit_d" = "139" ] && echo "RESULT: SIGSEGV_CONFIRMED" || echo "RESULT: PATCHED or exit $exit_d"
