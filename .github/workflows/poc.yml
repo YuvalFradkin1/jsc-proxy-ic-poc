@@ -11,45 +11,64 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Find jsc binary
+      - name: Find ALL jsc binaries and identify provenance
         run: |
-          # macOS: jsc is inside Xcode
-          JSC=$(find /Applications/Xcode*.app -name "jsc" -type f 2>/dev/null | head -1)
-          # fallback: JavaScriptCore Helpers
-          [ -z "$JSC" ] && JSC=$(find /System -name "jsc" -type f 2>/dev/null | head -1)
+          echo "=== PLATFORM ==="
+          uname -m
+          sw_vers
+          echo ""
+          echo "=== ALL JSC BINARIES ON SYSTEM ==="
+          find / -name "jsc" -type f 2>/dev/null | while read f; do
+            echo "--- $f ---"
+            file "$f"
+            codesign -dv "$f" 2>&1 | grep -E "Identifier|TeamIdentifier|Authority" || true
+            otool -L "$f" | grep -i "JavaScriptCore" || true
+            echo ""
+          done
+          echo ""
+          echo "=== SELECTING NON-iOS JSC ==="
+          # Prefer macOS JSC, not iOSSupport
+          JSC_MACOS=$(find /System/Library/Frameworks/JavaScriptCore.framework \
+                           -name "jsc" -type f 2>/dev/null | head -1)
+          JSC_XCODE=$(find /Applications/Xcode*.app/Contents \
+                           -name "jsc" -type f 2>/dev/null | grep -v iOSSupport | head -1)
+          JSC_ANY=$(find / -name "jsc" -type f 2>/dev/null \
+                        | grep -v iOSSupport | head -1)
+          echo "macOS framework JSC: $JSC_MACOS"
+          echo "Xcode JSC (non-iOS): $JSC_XCODE"
+          echo "Any non-iOS JSC:     $JSC_ANY"
+          # Pick best option
+          JSC="${JSC_MACOS:-${JSC_XCODE:-$JSC_ANY}}"
+          echo "SELECTED: $JSC"
           echo "JSC=$JSC" >> $GITHUB_ENV
-          echo "Found jsc: $JSC"
-          sw_vers && uname -m
-          ls /Applications/ | grep -i xcode || true
+          echo ""
+          echo "=== SELECTED BINARY DETAILS ==="
+          file "$JSC"
+          codesign -dv "$JSC" 2>&1
+          otool -L "$JSC"
 
       - name: Control A (expect exit 0)
         run: |
-          set +e
-          "$JSC" pocs/control_a.js 2>&1 &
-          PID=$!; sleep 8; kill $PID 2>/dev/null; wait $PID 2>/dev/null
-          EXIT=$?
+          set +e; "$JSC" pocs/control_a.js 2>&1; EXIT=$?
           echo "exit_a=$EXIT" >> $GITHUB_ENV
           echo "Control A exit: $EXIT"
 
       - name: Control B (expect exit 0)
         run: |
-          set +e
-          "$JSC" pocs/control_b.js 2>&1
-          EXIT=$?
+          set +e; "$JSC" pocs/control_b.js 2>&1; EXIT=$?
           echo "exit_b=$EXIT" >> $GITHUB_ENV
           echo "Control B exit: $EXIT"
 
       - name: Control C (expect exit 0)
         run: |
-          set +e
-          "$JSC" pocs/control_c.js 2>&1
-          EXIT=$?
+          set +e; "$JSC" pocs/control_c.js 2>&1; EXIT=$?
           echo "exit_c=$EXIT" >> $GITHUB_ENV
           echo "Control C exit: $EXIT"
 
       - name: PoC D - FULL TRIGGER (expect SIGSEGV exit 139)
         run: |
           echo "=== POC D: poly-proto + IC warm + setPrototypeOf(null) + re-access ==="
+          echo "JSC binary: $JSC"
           set +e
           "$JSC" pocs/poc_d.js 2>&1
           EXIT=$?
@@ -67,6 +86,10 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "JSC binary: $JSC"
+          echo "=== FINAL SUMMARY ==="
+          uname -m
+          sw_vers
+          echo "JSC: $JSC"
+          file "$JSC" 2>/dev/null || true
           echo "Control A: $exit_a | B: $exit_b | C: $exit_c | PoC D: $exit_d"
           [ "$exit_d" = "139" ] && echo "RESULT: SIGSEGV_CONFIRMED" || echo "RESULT: PATCHED or exit $exit_d"
