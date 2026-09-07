@@ -11,41 +11,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Find ALL jsc binaries and identify provenance
+      - name: Find jsc and check provenance
         run: |
           echo "=== PLATFORM ==="
           uname -m
           sw_vers
           echo ""
-          echo "=== ALL JSC BINARIES ON SYSTEM ==="
-          find / -name "jsc" -type f 2>/dev/null | while read f; do
-            echo "--- $f ---"
-            file "$f"
-            codesign -dv "$f" 2>&1 | grep -E "Identifier|TeamIdentifier|Authority" || true
-            otool -L "$f" | grep -i "JavaScriptCore" || true
-            echo ""
+          echo "=== SEARCHING JSC (targeted) ==="
+          # Search only specific known locations — no find /
+          for PATH_TRY in \
+            "/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc" \
+            "/System/Library/Frameworks/JavaScriptCore.framework/Helpers/jsc" \
+            "/usr/bin/jsc" \
+            "/usr/local/bin/jsc"; do
+            if [ -f "$PATH_TRY" ]; then
+              echo "Found: $PATH_TRY"
+              JSC="$PATH_TRY"
+              break
+            fi
           done
-          echo ""
-          echo "=== SELECTING NON-iOS JSC ==="
-          # Prefer macOS JSC, not iOSSupport
-          JSC_MACOS=$(find /System/Library/Frameworks/JavaScriptCore.framework \
-                           -name "jsc" -type f 2>/dev/null | head -1)
-          JSC_XCODE=$(find /Applications/Xcode*.app/Contents \
-                           -name "jsc" -type f 2>/dev/null | grep -v iOSSupport | head -1)
-          JSC_ANY=$(find / -name "jsc" -type f 2>/dev/null \
-                        | grep -v iOSSupport | head -1)
-          echo "macOS framework JSC: $JSC_MACOS"
-          echo "Xcode JSC (non-iOS): $JSC_XCODE"
-          echo "Any non-iOS JSC:     $JSC_ANY"
-          # Pick best option
-          JSC="${JSC_MACOS:-${JSC_XCODE:-$JSC_ANY}}"
+          # Xcode fallback — limited depth
+          if [ -z "$JSC" ]; then
+            JSC=$(find /Applications/Xcode.app/Contents/SharedFrameworks \
+                       -maxdepth 5 -name "jsc" -type f 2>/dev/null | \
+                       grep -v iOSSupport | head -1)
+          fi
           echo "SELECTED: $JSC"
           echo "JSC=$JSC" >> $GITHUB_ENV
           echo ""
-          echo "=== SELECTED BINARY DETAILS ==="
+          echo "=== PROVENANCE ==="
           file "$JSC"
           codesign -dv "$JSC" 2>&1
-          otool -L "$JSC"
+          otool -L "$JSC" | grep -i "JavaScriptCore"
 
       - name: Control A (expect exit 0)
         run: |
@@ -67,8 +64,7 @@ jobs:
 
       - name: PoC D - FULL TRIGGER (expect SIGSEGV exit 139)
         run: |
-          echo "=== POC D: poly-proto + IC warm + setPrototypeOf(null) + re-access ==="
-          echo "JSC binary: $JSC"
+          echo "=== POC D ==="
           set +e
           "$JSC" pocs/poc_d.js 2>&1
           EXIT=$?
@@ -86,10 +82,9 @@ jobs:
       - name: Summary
         if: always()
         run: |
-          echo "=== FINAL SUMMARY ==="
-          uname -m
+          echo "uname -m: $(uname -m)"
           sw_vers
           echo "JSC: $JSC"
           file "$JSC" 2>/dev/null || true
-          echo "Control A: $exit_a | B: $exit_b | C: $exit_c | PoC D: $exit_d"
-          [ "$exit_d" = "139" ] && echo "RESULT: SIGSEGV_CONFIRMED" || echo "RESULT: PATCHED or exit $exit_d"
+          echo "Control A:$exit_a B:$exit_b C:$exit_c PoC_D:$exit_d"
+          [ "$exit_d" = "139" ] && echo "RESULT: SIGSEGV_CONFIRMED" || echo "RESULT: $exit_d"
